@@ -12,5 +12,7 @@ python main.py \
     --per_device_train_batch_size=4 \
     --per_device_eval_batch_size=4 \
     --logging_steps 5 \
-    --overwrite_output_dir \
+    --evaluation_strategy "epoch" \
+    --eval_steps 50 \
+    --overwrite_output_dir False \
     --predict_with_generate

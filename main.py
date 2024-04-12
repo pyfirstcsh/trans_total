@@ -4,15 +4,27 @@ import sys
 import logging
 import datasets
 import transformers
+
 from arguments import parse_arguments
 from datapre import load_and_preprocess_data
 from model import load_model_and_tokenizer
 from trainer import initialize_trainer, train_and_evaluate
 from preder import predict
 from transformers import set_seed, DataCollatorForSeq2Seq
-from transformers.trainer_utils import get_last_checkpoint
 
+# import debugpy
+
+# try:
+#     # 5678 is the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+#     debugpy.listen(("localhost", 9501))
+#     print("Waiting for debugger attach")
+#     debugpy.wait_for_client()
+# except Exception as e:  # noqa: F841
+#     pass
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # 设置日志
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -39,32 +51,11 @@ def main():
     transformers.utils.logging.enable_explicit_format()
 
     # Log on each process the small summary:
-    logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}, "
-        + f"distributed training: {training_args.parallel_mode.value == 'distributed'}, 16-bits training: {training_args.fp16}"
-    )
-    logger.info(f"Training/evaluation parameters {training_args}")
-
-    # Detecting last checkpoint.
-    last_checkpoint = None
-    if (
-        os.path.isdir(training_args.output_dir)
-        and training_args.do_train
-        and not training_args.overwrite_output_dir
-    ):
-        last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-            raise ValueError(
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif (
-            last_checkpoint is not None and training_args.resume_from_checkpoint is None
-        ):
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
-            )
+    # logger.warning(
+    #     f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}, "
+    #     + f"distributed training: {training_args.parallel_mode.value == 'distributed'}, 16-bits training: {training_args.fp16}"
+    # )
+    # logger.info(f"Training/evaluation parameters {training_args}")
 
     # 设置随机种子，确保可重复性
     set_seed(training_args.seed)
@@ -75,6 +66,7 @@ def main():
     train_dataset, eval_dataset, predict_dataset = load_and_preprocess_data(
         data_args, model_args, training_args, tokenizer
     )
+
     # 初始化数据整理器
     data_collator = DataCollatorForSeq2Seq(
         tokenizer,

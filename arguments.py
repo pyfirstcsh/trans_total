@@ -196,6 +196,10 @@ class DataTrainingArguments:
         },
     )
 
+    def __post_init__(self):
+        if self.val_max_target_length is None:
+            self.val_max_target_length = self.max_target_length
+
 
 def parse_arguments():
     parser = HfArgumentParser(
