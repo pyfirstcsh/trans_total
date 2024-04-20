@@ -1,8 +1,13 @@
 #!/bin/bash
-python main.py \
+torchrun \
+    --nproc_per_node 4 \
+    --master_port=29503 \
+    main.py \
     --model_name_or_path ../../t5-small \
     --do_train \
     --do_eval \
+    --do_predict \
+    --fp16 True \
     --source_lang en \
     --target_lang fr \
     --source_prefix "translate English to Franch: " \
@@ -12,7 +17,5 @@ python main.py \
     --per_device_train_batch_size=4 \
     --per_device_eval_batch_size=4 \
     --logging_steps 5 \
-    --evaluation_strategy "epoch" \
-    --eval_steps 50 \
     --overwrite_output_dir False \
     --predict_with_generate

@@ -25,7 +25,6 @@ def load_model_and_tokenizer(model_args):
     # 加载模型
     model = AutoModelForSeq2SeqLM.from_pretrained(
         pretrained_model_name_or_path=model_args.model_name_or_path,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,

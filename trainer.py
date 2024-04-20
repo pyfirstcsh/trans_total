@@ -130,7 +130,9 @@ def train_and_evaluate(
         logger.info("*** Evaluate ***")
 
         metrics = trainer.evaluate(
-            max_length=max_length, num_beams=num_beams, metric_key_prefix="eval"
+            max_length=max_length,
+            num_beams=num_beams,
+            metric_key_prefix="eval",
         )
         max_eval_samples = (
             data_args.max_eval_samples

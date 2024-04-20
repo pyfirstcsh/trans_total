@@ -1,5 +1,5 @@
 # main.py
-import os
+# import os
 import sys
 import logging
 import datasets
@@ -22,7 +22,7 @@ from transformers import set_seed, DataCollatorForSeq2Seq
 # except Exception as e:  # noqa: F841
 #     pass
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # 设置日志
 
 logging.basicConfig(level=logging.INFO)
@@ -51,17 +51,18 @@ def main():
     transformers.utils.logging.enable_explicit_format()
 
     # Log on each process the small summary:
-    # logger.warning(
-    #     f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}, "
-    #     + f"distributed training: {training_args.parallel_mode.value == 'distributed'}, 16-bits training: {training_args.fp16}"
-    # )
-    # logger.info(f"Training/evaluation parameters {training_args}")
+    logger.warning(
+        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}, "
+        + f"distributed training: {training_args.parallel_mode.value == 'distributed'}, 16-bits training: {training_args.fp16}"
+    )
+    logger.info(f"Training/evaluation parameters {training_args}")
 
     # 设置随机种子，确保可重复性
     set_seed(training_args.seed)
 
     # 加载模型和分词器
     model, tokenizer = load_model_and_tokenizer(model_args)
+    logger.info(f"The construction of model {model}")
     # 加载和预处理数据集
     train_dataset, eval_dataset, predict_dataset = load_and_preprocess_data(
         data_args, model_args, training_args, tokenizer

@@ -22,7 +22,6 @@ def predict(
             predict_dataset,
             metric_key_prefix="predict",
             max_length=data_args.val_max_target_length,
-            num_beams=model_args.num_beams,
         )
 
         # 记录预测指标
