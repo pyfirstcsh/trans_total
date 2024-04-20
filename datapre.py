@@ -55,50 +55,6 @@ def preprocess_function_closure(tokenizer, data_args, training_args):
     return preprocess_function
 
 
-# def preprocess_function(
-#     examples, tokenizer, data_args, training_args
-# ) -> BatchEncoding:  # -> Any:
-#     # ...
-#     prefix = data_args.source_prefix if data_args.source_prefix is not None else ""
-#     source_lang = data_args.source_lang.split("_")[0]
-#     target_lang = data_args.target_lang.split("_")[0]
-#     max_target_length = (
-#         data_args.max_target_length
-#         if training_args.do_train
-#         else data_args.val_max_target_length
-#     )
-#     padding = "max_length" if data_args.pad_to_max_length else False
-
-#     inputs = [ex[source_lang] for ex in examples["translation"]]
-#     targets = [ex[target_lang] for ex in examples["translation"]]
-#     inputs = [prefix + inp for inp in inputs]
-#     model_inputs = tokenizer(
-#         inputs,
-#         max_length=data_args.max_source_length,
-#         padding=padding,
-#         truncation=True,
-#     )
-
-#     # Tokenize targets with the `text_target` keyword argument
-#     labels = tokenizer(
-#         text_target=targets,
-#         max_length=max_target_length,
-#         padding=padding,
-#         truncation=True,
-#     )
-
-#     # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
-#     # padding in the loss.
-#     if padding == "max_length" and data_args.ignore_pad_token_for_loss:
-#         labels["input_ids"] = [
-#             [(l if l != tokenizer.pad_token_id else -100) for l in label]  # noqa: E741
-#             for label in labels["input_ids"]
-#         ]
-
-#     model_inputs["labels"] = labels["input_ids"]
-#     return model_inputs
-
-
 def load_and_preprocess_data(data_args, model_args, training_args, tokenizer):
     # 加载和预处理数据集的代码
 
@@ -124,6 +80,7 @@ def load_and_preprocess_data(data_args, model_args, training_args, tokenizer):
 
     # 离线使用,划分好了数据集
     raw_datasets = load_from_disk(data_args.dataset_name)
+
 
     if training_args.do_train:
         column_names = raw_datasets["train"].column_names
@@ -152,9 +109,6 @@ def load_and_preprocess_data(data_args, model_args, training_args, tokenizer):
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
         with training_args.main_process_first(desc="train dataset map pre-processing"):
-            # lambda examples: preprocess_function(
-            #         examples, tokenizer, data_args, training_args
-            #     ),
             train_dataset = train_dataset.map(
                 preprocess_function,
                 batched=True,
@@ -169,6 +123,7 @@ def load_and_preprocess_data(data_args, model_args, training_args, tokenizer):
         if "validation" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = raw_datasets["validation"]
+        # eval_dataset = Dataset.from_dict(eval_dataset)
         if data_args.max_eval_samples is not None:
             max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
             eval_dataset = eval_dataset.select(range(max_eval_samples))
