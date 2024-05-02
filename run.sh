@@ -17,5 +17,6 @@ torchrun \
     --per_device_train_batch_size=4 \
     --per_device_eval_batch_size=4 \
     --logging_steps 500 \
+    --save_steps 5000 \
     --overwrite_output_dir False \
     --predict_with_generate
