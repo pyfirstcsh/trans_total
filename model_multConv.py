@@ -9,8 +9,6 @@ import torch.nn as nn
 
 from torch.nn import CrossEntropyLoss
 from transformers import (
-    AutoConfig,
-    AutoTokenizer,
     T5ForConditionalGeneration,
     T5PreTrainedModel,
 )
@@ -20,7 +18,6 @@ from transformers.modeling_outputs import (
     Seq2SeqLMOutput,
 )
 from transformers.models.t5.modeling_t5 import (
-    # T5Attention,
     T5Config,
     T5LayerFF,
     T5LayerNorm,
@@ -94,65 +91,13 @@ class ConvolutionalLayer(nn.Module):
 
         # 应用二维卷积
         y = self.conv2d(x_reshaped)  # [batch, out_channels, Height, Width]
-        
+
         # 将输出y形状变换回 [batch_size, n_seq, S, M]
         y = y.permute(0, 2, 1, 3)
 
         # 将输出y形状变换回 [batch_size, n_seq, d_model]
         y = y.reshape(batch_size, n_seq, d_model)
         return y
-
-
-# class MultConvAttn(T5Attention):
-#     def __init__(self, config: MultConvAttnConfig, has_relative_attention_bias=False):
-#         super().__init__(config)
-#         self.mult_dense_layer = MultiplicativeLayer(config)
-#         # 为Q、K、V定义不同的卷积层
-#         self.q = ConvolutionalLayer(config, mult=self.mult_dense_layer)
-#         self.k = ConvolutionalLayer(config, mult=self.mult_dense_layer)
-#         self.v = ConvolutionalLayer(config, mult=self.mult_dense_layer)
-
-
-# class MultConvAttnModel(T5ForConditionalGeneration):
-#     def __init__(self, config: MultConvAttnConfig, **kwargs):
-#         super().__init__(config)
-
-#         # 替换T5模型中的Attn
-#         for i in range(config.num_layers):
-#             self.encoder.block[i].layer[0].SelfAttention = MultConvAttn(config)
-#             self.decoder.block[i].layer[0].SelfAttention = MultConvAttn(config)
-#             self.decoder.block[i].layer[1].EncDecAttention = MultConvAttn(config)
-
-#     @classmethod
-#     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-#         # 加载配置
-#         config = kwargs.pop("config", None)
-#         if config is None:
-#             config = MultConvAttnConfig.from_pretrained(pretrained_model_name_or_path)
-#         # 首先，从预训练模型加载所有权重
-#         pretrained_weights = T5ForConditionalGeneration.from_pretrained(
-#             pretrained_model_name_or_path, config=config
-#         ).state_dict()
-
-#         # 提取注意力层权重的键
-#         # attention_weight_keys = [
-#         #     k
-#         #     for k in pretrained_weights.keys()
-#         #     if "SelfAttention" in k or "EncDecAttention" in k
-#         # ]
-#         # 删除注意力层权重以准备加载其他权重
-#         # for k in attention_weight_keys:
-#         #     del pretrained_weights[k]
-
-#         model = cls(config)
-#         # logger.info(model)
-#         # 加载除 FFN 之外的权重
-#         model.load_state_dict(pretrained_weights, strict=False)
-
-#         # 可以选择应用自定义的初始化方法，如果需要的话
-#         # model.apply(model._init_custom_weights)
-
-#         return model
 
 
 class MultConvAttention(nn.Module):
@@ -1357,51 +1302,3 @@ class MultConvForConditionalGeneration(T5PreTrainedModel):
         # model.apply(model._init_custom_weights)
 
         return model
-
-
-def load_model_and_tokenizer(model_args):
-    # 加载配置
-    config = AutoConfig.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
-    # 创建自定义配置
-    mult_conv_config = MultConvAttnConfig.from_dict(config.to_dict())
-    # 加载分词器
-    tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_fast=model_args.use_fast_tokenizer,
-        revision=model_args.model_revision,
-        use_auth_token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
-
-    # 加载模型
-    # model = MultConvAttnModel.from_pretrained(
-    #     pretrained_model_name_or_path=model_args.model_name_or_path,
-    #     config=mult_conv_config,
-    #     cache_dir=model_args.cache_dir,
-    #     revision=model_args.model_revision,
-    #     use_auth_token=model_args.token,
-    #     trust_remote_code=model_args.trust_remote_code,
-    # )
-    model = MultConvForConditionalGeneration.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        config=mult_conv_config,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
-
-    # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
-    # on a small vocab and want a smaller embedding size, remove this test.
-    embedding_size = model.get_input_embeddings().weight.shape[0]
-    if len(tokenizer) > embedding_size:
-        model.resize_token_embeddings(len(tokenizer))
-
-    return model, tokenizer

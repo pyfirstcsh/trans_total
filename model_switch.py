@@ -6,7 +6,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
-from transformers import AutoConfig, AutoTokenizer, T5ForConditionalGeneration
+from transformers import T5ForConditionalGeneration
 from transformers.modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPastAndCrossAttentions,
@@ -165,54 +165,6 @@ class SwitchLayerFF(nn.Module):
             output = (output, router_tuple)
 
         return output
-
-
-# 自定义的模型
-class SwitchModel(T5ForConditionalGeneration):
-    def __init__(self, config: SwitchConfig, **kwargs):
-        super().__init__(config)
-        # self.is_decoder = config.is_decoder
-        # 替换T5模型中的FFN层
-        for i in range(config.num_layers):
-            self.encoder.block[i].layer[1] = SwitchLayerFF(config)
-            self.decoder.block[i].layer[2] = SwitchLayerFF(config)
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        # 加载配置
-        config = kwargs.pop("config", None)
-        if config is None:
-            config = SwitchConfig.from_pretrained(pretrained_model_name_or_path)
-
-        # 首先，从预训练模型加载所有权重
-        pretrained_weights = T5ForConditionalGeneration.from_pretrained(
-            pretrained_model_name_or_path, config=config
-        ).state_dict()
-
-        # 提取 FFN 权重
-        # ffn_weight_keys = [
-        #     k for k in pretrained_weights.keys() if "DenseReluDense" in k
-        # ]
-
-        # ffn_weights = {k: pretrained_weights[k] for k in ffn_weight_keys}
-        # 删除 FFN 权重以准备加载非FFN权重
-        # for k in ffn_weight_keys:
-        #     del pretrained_weights[k]
-
-        # 创建模型的新实例
-        model = cls(config)
-
-        # 加载除 FFN 之外的权重
-        model.load_state_dict(pretrained_weights, strict=False)
-
-        # 将 FFN 权重加载到 MoE 的每个专家中
-        # for expert in model.switch_ffn.mlp.experts.values():
-        #     expert.load_state_dict(ffn_weights, strict=False)
-
-        # 可以选择应用自定义的初始化方法，如果需要的话
-        # model.apply(model._init_custom_weights)
-
-        return model
 
 
 class T5Block(nn.Module):
@@ -1086,53 +1038,3 @@ class SwitchForConditionalGeneration(T5PreTrainedModel):
         # model.apply(model._init_custom_weights)
 
         return model
-
-
-def load_model_and_tokenizer(model_args):
-    # 加载配置
-    config = AutoConfig.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
-    # config = SwitchConfig.from_pretrained(
-    #     pretrained_model_name_or_path=model_args.model_name_or_path,
-    #     # ... [其他参数]
-    # )
-    # 创建自定义配置
-    switch_config = SwitchConfig.from_dict(
-        config.to_dict()
-    )  # 转换为字典并更新任何自定义配置参数
-
-    # 加载分词器
-    tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_fast=model_args.use_fast_tokenizer,
-        revision=model_args.model_revision,
-        use_auth_token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
-
-    # 创建自定义模型
-    # model = SwitchModel.from_pretrained(
-    #     pretrained_model_name_or_path=model_args.model_name_or_path,
-    #     config=switch_config,
-    #     cache_dir=model_args.cache_dir,
-    # )
-
-    model = SwitchForConditionalGeneration.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        config=switch_config,
-        cache_dir=model_args.cache_dir,
-        ignore_mismatched_sizes=True,
-    )
-    # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
-    # on a small vocab and want a smaller embedding size, remove this test.
-    embedding_size = model.get_input_embeddings().weight.shape[0]
-    if len(tokenizer) > embedding_size:
-        model.resize_token_embeddings(len(tokenizer))
-
-    return model, tokenizer

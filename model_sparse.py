@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
-from transformers import AutoConfig, AutoTokenizer, T5ForConditionalGeneration
+from transformers import T5ForConditionalGeneration
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -114,76 +114,6 @@ class SparseLayerFF(nn.Module):
             output = (output, router_tuple)
 
         return output
-
-
-class SparseModel(T5ForConditionalGeneration):
-    def __init__(self, config: SparseConfig, **kwargs):
-        super().__init__()
-
-        # self.is_decoder = config.is_decoder
-        # 替换T5模型中的FFN层
-        for i in range(config.num_layers):
-            self.encoder.block[i].layer[1] = SparseLayerFF(config)
-            self.decoder.block[i].layer[2] = SparseLayerFF(config)
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        # 加载配置
-        config = kwargs.pop("config", None)
-        if config is None:
-            config = SparseConfig.from_pretrained(pretrained_model_name_or_path)
-        # 首先，从预训练模型加载所有权重
-        pretrained_weights = T5ForConditionalGeneration.from_pretrained(
-            pretrained_model_name_or_path, config=config
-        ).state_dict()
-
-        # 提取 FFN 权重
-        ffn_weight_keys = [
-            k for k in pretrained_weights.keys() if "DenseReluDense" in k
-        ]
-        ffn_weights = {k: pretrained_weights[k] for k in ffn_weight_keys}
-        # 打印 FFN 权重的键来确认
-        # logger.info(ffn_weights)
-        # for key in ffn_weights:
-        #     print(key)
-        # 删除 FFN 权重以准备加载非FFN权重
-        for k in ffn_weight_keys:
-            del pretrained_weights[k]
-
-        # 创建模型的新实例
-        model = cls(config)
-        logger.info(model)
-        # 加载除 FFN 之外的权重
-        model.load_state_dict(pretrained_weights, strict=False)
-
-        # 手动加载 FFN 权重
-        for i in range(config.num_layers):
-            logger.info(f"Loaded pretrained weights in FFN weights{i}")
-
-            ffn_wi_weight = ffn_weights[
-                f"encoder.block.{i}.layer.1.DenseReluDense.wi.weight"
-            ]
-            ffn_wo_weight = ffn_weights[
-                f"encoder.block.{i}.layer.1.DenseReluDense.wo.weight"
-            ]
-            # logger.info(f"weight{ffn_wo_weight}")
-            # 请确认这里的层级路径与您模型的路径一致
-            model.encoder.block[i].layer[1].mlp.wi.weight.data = ffn_wi_weight
-            model.encoder.block[i].layer[1].mlp.wo.weight.data = ffn_wo_weight
-            ffn_wi_weight = ffn_weights[
-                f"decoder.block.{i}.layer.2.DenseReluDense.wi.weight"
-            ]
-            ffn_wo_weight = ffn_weights[
-                f"decoder.block.{i}.layer.2.DenseReluDense.wo.weight"
-            ]
-            # 同样确认这里的层级路径
-            model.decoder.block[i].layer[2].mlp.wi.weight.data = ffn_wi_weight
-            model.decoder.block[i].layer[2].mlp.wo.weight.data = ffn_wo_weight
-
-        # 可以选择应用自定义的初始化方法，如果需要的话
-        # model.apply(model._init_custom_weights)
-
-        return model
 
 
 class T5Block(nn.Module):
@@ -1052,48 +982,3 @@ class SparseForConditionalGeneration(T5PreTrainedModel):
         # model.apply(model._init_custom_weights)
 
         return model
-
-
-def load_model_and_tokenizer(model_args):
-    # 加载配置
-    config = AutoConfig.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
-    # config = SwitchConfig.from_pretrained(
-    #     pretrained_model_name_or_path=model_args.model_name_or_path,
-    #     # ... [其他参数]
-    # )
-    # 创建自定义配置
-    sparse_config = SparseConfig.from_dict(
-        config.to_dict()
-    )  # 转换为字典并更新任何自定义配置参数
-
-    # 加载分词器
-    tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_fast=model_args.use_fast_tokenizer,
-        revision=model_args.model_revision,
-        use_auth_token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
-
-    # 创建自定义模型
-    model = SparseForConditionalGeneration.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        config=sparse_config,
-        cache_dir=model_args.cache_dir,
-        ignore_mismatched_sizes=True,
-    )
-
-    # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
-    # on a small vocab and want a smaller embedding size, remove this test.
-    embedding_size = model.get_input_embeddings().weight.shape[0]
-    if len(tokenizer) > embedding_size:
-        model.resize_token_embeddings(len(tokenizer))
-
-    return model, tokenizer

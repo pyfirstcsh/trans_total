@@ -7,7 +7,7 @@ from typing import Optional, Tuple, Union
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
-from transformers import AutoConfig, AutoTokenizer, T5PreTrainedModel
+from transformers import T5PreTrainedModel
 from transformers.modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPastAndCrossAttentions,
@@ -26,7 +26,7 @@ from flop import HardConcreteProjectedLinear  # ProjectedLinear
 logger = logging.get_logger(__name__)
 
 
-class FT5Attention(nn.Module):
+class FLOPAttention(nn.Module):
     def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__()
         self.is_decoder = config.is_decoder
@@ -315,10 +315,10 @@ class FT5Attention(nn.Module):
         return outputs
 
 
-class FT5LayerSelfAttention(nn.Module):
+class T5LayerSelfAttention(nn.Module):
     def __init__(self, config, has_relative_attention_bias=False):
         super().__init__()
-        self.SelfAttention = FT5Attention(
+        self.SelfAttention = FLOPAttention(
             config, has_relative_attention_bias=has_relative_attention_bias
         )
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
@@ -351,10 +351,10 @@ class FT5LayerSelfAttention(nn.Module):
         return outputs
 
 
-class FT5LayerCrossAttention(nn.Module):
+class T5LayerCrossAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.EncDecAttention = FT5Attention(config, has_relative_attention_bias=False)
+        self.EncDecAttention = FLOPAttention(config, has_relative_attention_bias=False)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
@@ -389,18 +389,18 @@ class FT5LayerCrossAttention(nn.Module):
         return outputs
 
 
-class FT5Block(nn.Module):
+class T5Block(nn.Module):
     def __init__(self, config, has_relative_attention_bias=False):
         super().__init__()
         self.is_decoder = config.is_decoder
         self.layer = nn.ModuleList()
         self.layer.append(
-            FT5LayerSelfAttention(
+            T5LayerSelfAttention(
                 config, has_relative_attention_bias=has_relative_attention_bias
             )
         )
         if self.is_decoder:
-            self.layer.append(FT5LayerCrossAttention(config))
+            self.layer.append(T5LayerCrossAttention(config))
 
         self.layer.append(T5LayerFF(config))
 
@@ -529,7 +529,7 @@ class FT5Block(nn.Module):
         return outputs  # hidden-states, present_key_value_states, (self-attention position bias), (self-attention weights), (cross-attention position bias), (cross-attention weights)
 
 
-class FT5Stack(T5PreTrainedModel):
+class T5Stack(T5PreTrainedModel):
     def __init__(self, config, embed_tokens=None):
         super().__init__(config)
 
@@ -538,7 +538,7 @@ class FT5Stack(T5PreTrainedModel):
 
         self.block = nn.ModuleList(
             [
-                FT5Block(config, has_relative_attention_bias=bool(i == 0))
+                T5Block(config, has_relative_attention_bias=bool(i == 0))
                 for i in range(config.num_layers)
             ]
         )
@@ -857,7 +857,7 @@ class FT5Stack(T5PreTrainedModel):
         )
 
 
-class FT5ForConditionalGeneration(T5PreTrainedModel):
+class FLOPForConditionalGeneration(T5PreTrainedModel):
     _keys_to_ignore_on_load_unexpected = [
         "decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight",
     ]
@@ -877,13 +877,13 @@ class FT5ForConditionalGeneration(T5PreTrainedModel):
         encoder_config.is_decoder = False
         encoder_config.use_cache = False
         encoder_config.is_encoder_decoder = False
-        self.encoder = FT5Stack(encoder_config, self.shared)
+        self.encoder = T5Stack(encoder_config, self.shared)
 
         decoder_config = copy.deepcopy(config)
         decoder_config.is_decoder = True
         decoder_config.is_encoder_decoder = False
         decoder_config.num_layers = config.num_decoder_layers
-        self.decoder = FT5Stack(decoder_config, self.shared)
+        self.decoder = T5Stack(decoder_config, self.shared)
 
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
@@ -1196,120 +1196,3 @@ class FT5ForConditionalGeneration(T5PreTrainedModel):
                 reordered_layer_past_states,
             )
         return reordered_decoder_past
-
-
-# class FLOPAttention(T5Attention):
-#     def __init__(self, config, has_relative_attention_bias=False):
-#         super().__init__(config)
-
-#         self.q = HardConcreteProjectedLinear.from_module(
-#             module=ProjectedLinear.from_module(module=self.q),
-#             init_mean=0.5,  # 初始化参数的均值
-#             init_std=0.01,  # 初始化参数的标准差
-#             keep_weights=False,  # 是否保留原始权重
-#         )
-#         self.k = HardConcreteProjectedLinear.from_module(
-#             module=ProjectedLinear.from_module(module=self.k),
-#             init_mean=0.5,  # 初始化参数的均值
-#             init_std=0.01,  # 初始化参数的标准差
-#             keep_weights=False,  # 是否保留原始权重
-#         )
-#         self.v = HardConcreteProjectedLinear.from_module(
-#             module=ProjectedLinear.from_module(module=self.v),
-#             init_mean=0.5,  # 初始化参数的均值
-#             init_std=0.01,  # 初始化参数的标准差
-#             keep_weights=False,  # 是否保留原始权重
-#         )
-#         self.o = HardConcreteProjectedLinear.from_module(
-#             module=ProjectedLinear.from_module(module=self.o),
-#             init_mean=0.5,  # 初始化参数的均值
-#             init_std=0.01,  # 初始化参数的标准差
-#             keep_weights=False,  # 是否保留原始权重
-#         )
-
-# class FLOPAttnModel(FT5ForConditionalGeneration):
-#     def __init__(self, config, **kwargs):
-#         super().__init__(config)
-
-#         # 替换T5模型中的Attn
-#         for i in range(config.num_layers):
-#             self.encoder.block[i].layer[0] = T5LayerSelfAttention(config)
-#             self.decoder.block[i].layer[0] = T5LayerSelfAttention(config)
-#             self.decoder.block[i].layer[1] = T5LayerCrossAttention(config)
-
-#     @classmethod
-#     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-#         # 加载配置
-#         config = kwargs.pop("config", None)
-#         if config is None:
-#             config = T5Config.from_pretrained(pretrained_model_name_or_path)
-#         # 首先，从预训练模型加载所有权重
-#         pretrained_weights = T5ForConditionalGeneration.from_pretrained(
-#             pretrained_model_name_or_path, config=config
-#         ).state_dict()
-
-#         # 提取注意力层权重的键
-#         attention_weight_keys = [
-#             k
-#             for k in pretrained_weights.keys()
-#             if "SelfAttention" in k or "EncDecAttention" in k
-#         ]
-#         # 删除注意力层权重以准备加载其他权重
-#         for k in attention_weight_keys:
-#             del pretrained_weights[k]
-
-#         model = cls(config)
-
-#         # 加载除了注意力层之外的权重
-#         model.load_state_dict(pretrained_weights, strict=False)
-
-#         return model
-
-
-def load_model_and_tokenizer(model_args):
-    # 加载配置
-    config = AutoConfig.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
-
-    # 加载分词器
-    tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_fast=model_args.use_fast_tokenizer,
-        revision=model_args.model_revision,
-        use_auth_token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
-
-    # 加载模型
-    # model = FLOPAttnModel.from_pretrained(
-    #     pretrained_model_name_or_path=model_args.model_name_or_path,
-    #     config=config,
-    #     cache_dir=model_args.cache_dir,
-    #     revision=model_args.model_revision,
-    #     use_auth_token=model_args.token,
-    #     trust_remote_code=model_args.trust_remote_code,
-    # )
-
-    model = FT5ForConditionalGeneration.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        config=config,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-        ignore_mismatched_sizes=True,
-    )
-
-    # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
-    # on a small vocab and want a smaller embedding size, remove this test.
-    embedding_size = model.get_input_embeddings().weight.shape[0]
-    if len(tokenizer) > embedding_size:
-        model.resize_token_embeddings(len(tokenizer))
-
-    return model, tokenizer
