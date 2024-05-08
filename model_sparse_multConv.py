@@ -1,4 +1,3 @@
-# model.py
 import copy
 import math
 import warnings
@@ -6,11 +5,13 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
-from transformers import (
-    T5ForConditionalGeneration,
-    T5PreTrainedModel,
+from transformers import T5ForConditionalGeneration
+from transformers.activations import ACT2FN
+from transformers.pytorch_utils import (
+    find_pruneable_heads_and_indices,
+    prune_linear_layer,
 )
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -18,24 +19,19 @@ from transformers.modeling_outputs import (
     Seq2SeqLMOutput,
 )
 from transformers.models.t5.modeling_t5 import (
-    T5Config,
-    T5LayerFF,
     T5LayerNorm,
-)
-from transformers.pytorch_utils import (
-    find_pruneable_heads_and_indices,
-    prune_linear_layer,
+    T5PreTrainedModel,
 )
 from transformers.utils import logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
-from config import MultConvAttnConfig
+from config import SparseMultConvConfig
 
 logger = logging.get_logger(__name__)
 
 
 class MultiplicativeLayer(nn.Module):
-    def __init__(self, config: MultConvAttnConfig):
+    def __init__(self, config: SparseMultConvConfig):
         super().__init__()
         self.S = config.num_heads  # S设置为头的数量
         self.M = config.d_kv  # M设置成每个头的维度
@@ -65,7 +61,7 @@ class MultiplicativeLayer(nn.Module):
 
 
 class ConvolutionalLayer(nn.Module):
-    def __init__(self, config: MultConvAttnConfig):
+    def __init__(self, config: SparseMultConvConfig):
         super(ConvolutionalLayer, self).__init__()
         self.S = config.num_heads
         self.M = config.d_kv
@@ -101,7 +97,7 @@ class ConvolutionalLayer(nn.Module):
 
 
 class MultConvAttention(nn.Module):
-    def __init__(self, config: T5Config, has_relative_attention_bias=False):
+    def __init__(self, config: SparseMultConvConfig, has_relative_attention_bias=False):
         super().__init__()
         self.is_decoder = config.is_decoder
         self.has_relative_attention_bias = has_relative_attention_bias
@@ -464,6 +460,95 @@ class T5LayerCrossAttention(nn.Module):
         return outputs
 
 
+class SparseController(nn.Module):
+    def __init__(self, config: SparseMultConvConfig):
+        super().__init__()
+        self.c_temperature = config.c_temperature
+        self.N = config.N
+        self.C1 = nn.Linear(config.d_model, config.d_lowrank)
+        self.C2 = nn.Linear(config.d_lowrank, config.d_ff)
+
+        # Initialize weights
+        nn.init.xavier_uniform_(self.C1.weight)
+        nn.init.xavier_uniform_(self.C2.weight)
+        if self.C1.bias is not None:
+            nn.init.zeros_(self.C1.bias)
+        if self.C2.bias is not None:
+            nn.init.zeros_(self.C2.bias)
+
+    def forward(self, x):
+        logits = self.C2(self.C1(x))
+        # record shape[batchsize,seqlen,d_ff]
+        shape = logits.shape
+        # Reshape logits to (batch_size * seq_len, N)
+        logits = logits.view(-1, self.N)
+
+        if self.training:
+            # Use Gumbel-Softmax during training
+            sparse_weights = F.gumbel_softmax(logits, tau=self.c_temperature, hard=True)
+        else:
+            # Use argmax during inference to get one-hot vectors
+            sparse_weights = F.one_hot(
+                logits.argmax(dim=-1), num_classes=self.N
+            ).float()
+        # Reshape back to the original input shape
+        return sparse_weights.view(shape)
+
+
+class SparseDenseActDense(nn.Module):
+    def __init__(self, config: SparseMultConvConfig) -> None:
+        super().__init__()
+        self.wi = nn.Linear(config.d_model, config.d_ff, bias=False)
+        self.wo = nn.Linear(config.d_ff, config.d_model, bias=False)
+        self.act = ACT2FN[config.dense_act_fn]
+        self.controller = SparseController(config)
+        self.dropout = nn.Dropout(config.dropout_rate)
+
+    def forward(self, hidden_states):
+        # 应用controller得到稀疏结构
+        controller_output = self.controller(hidden_states)
+        hidden_states = self.wi(hidden_states)
+        hidden_states = self.act(hidden_states)
+        # 应用该稀疏结构
+        hidden_states = hidden_states * controller_output
+
+        hidden_states = self.dropout(hidden_states)
+
+        if (
+            isinstance(self.wo.weight, torch.Tensor)
+            and hidden_states.dtype != self.wo.weight.dtype
+            and self.wo.weight.dtype != torch.int8
+        ):
+            hidden_states = hidden_states.to(self.wo.weight.dtype)
+
+        hidden_states = self.wo(hidden_states)
+        return hidden_states
+
+
+class SparseLayerFF(nn.Module):
+    def __init__(self, config: SparseMultConvConfig):
+        super().__init__()
+        self.mlp = SparseDenseActDense(config)
+        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.dropout = nn.Dropout(config.dropout_rate)
+
+    def forward(self, hidden_states, output_router_logits=False):
+        forwarded_states = self.layer_norm(hidden_states)
+        forwarded_states = self.mlp(forwarded_states)
+
+        if isinstance(forwarded_states, tuple):
+            forwarded_states, router_tuple = forwarded_states
+        else:
+            router_tuple = None
+
+        output = hidden_states + self.dropout(forwarded_states)
+
+        if output_router_logits and router_tuple is not None:
+            output = (output, router_tuple)
+
+        return output
+
+
 class T5Block(nn.Module):
     def __init__(self, config, has_relative_attention_bias=False):
         super().__init__()
@@ -477,7 +562,7 @@ class T5Block(nn.Module):
         if self.is_decoder:
             self.layer.append(T5LayerCrossAttention(config))
 
-        self.layer.append(T5LayerFF(config))
+        self.layer.append(SparseLayerFF(config))
 
     def forward(
         self,
@@ -932,7 +1017,7 @@ class T5Stack(T5PreTrainedModel):
         )
 
 
-class MultConvForConditionalGeneration(T5PreTrainedModel):
+class SparseMultConvForConditionalGeneration(T5PreTrainedModel):
     _keys_to_ignore_on_load_unexpected = [
         "decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight",
     ]
@@ -942,7 +1027,7 @@ class MultConvForConditionalGeneration(T5PreTrainedModel):
         "lm_head.weight",
     ]
 
-    def __init__(self, config: T5Config):
+    def __init__(self, config: SparseMultConvConfig):
         super().__init__(config)
         self.model_dim = config.d_model
 
@@ -1277,11 +1362,21 @@ class MultConvForConditionalGeneration(T5PreTrainedModel):
         # 加载配置
         config = kwargs.pop("config", None)
         if config is None:
-            config = MultConvAttnConfig.from_pretrained(pretrained_model_name_or_path)
+            config = SparseMultConvConfig.from_pretrained(pretrained_model_name_or_path)
         # 首先，从预训练模型加载所有权重
         pretrained_weights = T5ForConditionalGeneration.from_pretrained(
             pretrained_model_name_or_path, config=config
         ).state_dict()
+
+        # 提取 FFN 权重
+        ffn_weight_keys = [
+            k for k in pretrained_weights.keys() if "DenseReluDense" in k
+        ]
+        ffn_weights = {k: pretrained_weights[k] for k in ffn_weight_keys}
+
+        # 删除 FFN 权重以准备加载非FFN权重
+        for k in ffn_weight_keys:
+            del pretrained_weights[k]
 
         # 提取注意力层权重的键
         attention_weight_keys = [
@@ -1292,11 +1387,35 @@ class MultConvForConditionalGeneration(T5PreTrainedModel):
         # 删除注意力层权重以准备加载其他权重
         for k in attention_weight_keys:
             del pretrained_weights[k]
-
+            
+        # 创建模型的新实例
         model = cls(config)
-        
-        # 加载除 注意力层 之外的权重
+
+        # 加载除 FFN 之外的权重
         model.load_state_dict(pretrained_weights, strict=False)
+
+        # 手动加载 FFN 权重
+        for i in range(config.num_layers):
+            logger.info(f"Loaded pretrained weights in FFN weights{i}")
+
+            ffn_wi_weight = ffn_weights[
+                f"encoder.block.{i}.layer.1.DenseReluDense.wi.weight"
+            ]
+            ffn_wo_weight = ffn_weights[
+                f"encoder.block.{i}.layer.1.DenseReluDense.wo.weight"
+            ]
+            # 请确认这里的层级路径与您模型的路径一致
+            model.encoder.block[i].layer[1].mlp.wi.weight.data = ffn_wi_weight
+            model.encoder.block[i].layer[1].mlp.wo.weight.data = ffn_wo_weight
+            ffn_wi_weight = ffn_weights[
+                f"decoder.block.{i}.layer.2.DenseReluDense.wi.weight"
+            ]
+            ffn_wo_weight = ffn_weights[
+                f"decoder.block.{i}.layer.2.DenseReluDense.wo.weight"
+            ]
+            # 同样确认这里的层级路径
+            model.decoder.block[i].layer[2].mlp.wi.weight.data = ffn_wi_weight
+            model.decoder.block[i].layer[2].mlp.wo.weight.data = ffn_wo_weight
 
         # 可以选择应用自定义的初始化方法，如果需要的话
         # model.apply(model._init_custom_weights)
