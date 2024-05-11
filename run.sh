@@ -15,7 +15,7 @@ torchrun \
     --source_prefix "translate English to Franch: " \
     --dataset_name ../../data/kde4_en_fr \
     --cache_dir ./cache \
-    --output_dir ./output_switchDiv_sparse_multConv \
+    --output_dir ./output \
     --per_device_train_batch_size=4 \
     --per_device_eval_batch_size=4 \
     --logging_steps 100 \
