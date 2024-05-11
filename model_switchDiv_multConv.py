@@ -1,38 +1,103 @@
-# model.py
 import copy
 import math
 import warnings
 from typing import Optional, Tuple, Union
 
 import torch
-from torch import nn
+import torch.nn as nn
 from torch.nn import CrossEntropyLoss
-from transformers import T5PreTrainedModel
+from transformers import T5ForConditionalGeneration
 from transformers.modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPastAndCrossAttentions,
     Seq2SeqLMOutput,
 )
-from transformers.models.t5.modeling_t5 import (
-    T5Config,
-    T5LayerFF,
-    T5LayerNorm,
-    T5ForConditionalGeneration,
-)
 from transformers.pytorch_utils import (
     find_pruneable_heads_and_indices,
     prune_linear_layer,
 )
+from transformers.activations import ACT2FN
+from transformers.models.t5.modeling_t5 import (
+    T5DenseActDense,
+    T5LayerNorm,
+    T5PreTrainedModel,
+)
 from transformers.utils import logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 
-from flop import HardConcreteProjectedLinear  # ProjectedLinear
+from config import SwitchMultConvConfig
 
 logger = logging.get_logger(__name__)
 
 
-class FLOPAttention(nn.Module):
-    def __init__(self, config: T5Config, has_relative_attention_bias=False):
+class MultiplicativeLayer(nn.Module):
+    def __init__(self, config: SwitchMultConvConfig):
+        super().__init__()
+        self.S = config.num_heads  # S设置为头的数量
+        self.M = config.d_kv  # M设置成每个头的维度
+
+        # 初始化权重矩阵D和E
+        self.D = nn.Parameter(torch.randn(self.S, config.d_model))
+        self.E = nn.Parameter(torch.randn(config.d_model, self.M))
+
+    def forward(self, x):
+        # 获取batch_size, n_seq, 和 d_model
+        batch_size, n_seq, d_model = x.size()
+
+        # 扩展D以匹配输入x的形状
+        D_expanded = (
+            self.D.unsqueeze(0).unsqueeze(0).expand(batch_size, n_seq, -1, -1)
+        )  # [b,n.S,d]
+
+        # 逐元素乘法
+        x_mul_D = x.unsqueeze(2) * D_expanded  # [b, n, S, d]
+
+        # 将结果与E进行矩阵乘法
+        y = torch.matmul(x_mul_D, self.E)  # [b, n, S, M]
+
+        # 将输出y形状变换回 [batch_size, n_seq, d_model]
+        y = y.reshape(batch_size, n_seq, d_model)
+        return y
+
+
+class ConvolutionalLayer(nn.Module):
+    def __init__(self, config: SwitchMultConvConfig):
+        super(ConvolutionalLayer, self).__init__()
+        self.S = config.num_heads
+        self.M = config.d_kv
+        self.F = config.F
+        # 定义二维卷积层
+        # M作为in_channels和，n_seq和S分别被视为图像的高度和宽度。
+        self.conv2d = nn.Conv2d(
+            in_channels=self.M,
+            out_channels=self.M,
+            kernel_size=(self.F, self.F),
+            padding=(self.F // 2, self.F // 2),
+            groups=self.M,
+        )  # 使用groups=M来确保每个输入通道都有一个独立的过滤器集
+
+    def forward(self, x):
+        # 原有形状
+        batch_size, n_seq, d_model = x.size()
+
+        # 将输入x形状变换为 [batch_size, n_seq, S, M]
+        x_reshaped = x.reshape(batch_size, n_seq, self.S, self.M)
+
+        x_reshaped = x_reshaped.permute(0, 3, 1, 2)  # [batch, M, n_seq, S]
+
+        # 应用二维卷积
+        y = self.conv2d(x_reshaped)  # [batch, out_channels, Height, Width]
+
+        # 将输出y形状变换回 [batch_size, n_seq, S, M]
+        y = y.permute(0, 2, 1, 3)
+
+        # 将输出y形状变换回 [batch_size, n_seq, d_model]
+        y = y.reshape(batch_size, n_seq, d_model)
+        return y
+
+
+class MultConvAttention(nn.Module):
+    def __init__(self, config: SwitchMultConvConfig, has_relative_attention_bias=False):
         super().__init__()
         self.is_decoder = config.is_decoder
         self.has_relative_attention_bias = has_relative_attention_bias
@@ -48,16 +113,13 @@ class FLOPAttention(nn.Module):
         # self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
         # self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)
         # self.v = nn.Linear(self.d_model, self.inner_dim, bias=False)
-        # self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)
+        # self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)//去除
 
-        # self.q = HardConcreteProjectedLinear.from_module(
-        #     module=ProjectedLinear.from_module(module=self.q), keep_weights=True
-        # )
-
-        self.q = HardConcreteProjectedLinear(self.d_model, self.d_model, bias=False)
-        self.k = HardConcreteProjectedLinear(self.d_model, self.d_model, bias=False)
-        self.v = HardConcreteProjectedLinear(self.d_model, self.d_model, bias=False)
-        self.o = HardConcreteProjectedLinear(self.d_model, self.d_model, bias=False)
+        self.mult_dense_layer = MultiplicativeLayer(config)
+        # 为Q、K、V定义不同的卷积层
+        self.q = ConvolutionalLayer(config)
+        self.k = ConvolutionalLayer(config)
+        self.v = ConvolutionalLayer(config)
 
         if self.has_relative_attention_bias:
             self.relative_attention_bias = nn.Embedding(
@@ -76,7 +138,7 @@ class FLOPAttention(nn.Module):
         self.q = prune_linear_layer(self.q, index)
         self.k = prune_linear_layer(self.k, index)
         self.v = prune_linear_layer(self.v, index)
-        self.o = prune_linear_layer(self.o, index, dim=1)
+        # self.o = prune_linear_layer(self.o, index, dim=1)
         # Update hyper params
         self.n_heads = self.n_heads - len(heads)
         self.inner_dim = self.key_value_proj_dim * self.n_heads
@@ -238,6 +300,8 @@ class FLOPAttention(nn.Module):
                     hidden_states = past_key_value
             return hidden_states
 
+        # 应用乘性层
+        hidden_states = self.mult_dense_layer(hidden_states)
         # get query states
         query_states = shape(
             self.q(hidden_states)
@@ -308,7 +372,7 @@ class FLOPAttention(nn.Module):
         attn_output = unshape(
             torch.matmul(attn_weights, value_states)
         )  # (batch_size, seq_length, dim)
-        attn_output = self.o(attn_output)
+        # attn_output = self.o(attn_output)
 
         present_key_value_state = (
             (key_states, value_states) if (self.is_decoder and use_cache) else None
@@ -323,7 +387,7 @@ class FLOPAttention(nn.Module):
 class T5LayerSelfAttention(nn.Module):
     def __init__(self, config, has_relative_attention_bias=False):
         super().__init__()
-        self.SelfAttention = FLOPAttention(
+        self.SelfAttention = MultConvAttention(
             config, has_relative_attention_bias=has_relative_attention_bias
         )
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
@@ -359,7 +423,9 @@ class T5LayerSelfAttention(nn.Module):
 class T5LayerCrossAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.EncDecAttention = FLOPAttention(config, has_relative_attention_bias=False)
+        self.EncDecAttention = MultConvAttention(
+            config, has_relative_attention_bias=False
+        )
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
@@ -394,8 +460,176 @@ class T5LayerCrossAttention(nn.Module):
         return outputs
 
 
+class DivDenseActDense(nn.Module):
+    def __init__(self, config: SwitchMultConvConfig):
+        super().__init__()
+        self.wi = nn.Linear(
+            config.d_model,
+            config.d_ff // config.num_experts,
+            bias=False,
+        )
+        self.wo = nn.Linear(
+            config.d_ff // config.num_experts, config.d_model, bias=False
+        )
+        self.dropout = nn.Dropout(config.dropout_rate)
+        self.act = ACT2FN[config.dense_act_fn]
+
+    def forward(self, hidden_states):
+        hidden_states = self.wi(hidden_states)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        if (
+            isinstance(self.wo.weight, torch.Tensor)
+            and hidden_states.dtype != self.wo.weight.dtype
+            and self.wo.weight.dtype != torch.int8
+        ):
+            hidden_states = hidden_states.to(self.wo.weight.dtype)
+        hidden_states = self.wo(hidden_states)
+        return hidden_states
+
+
+class Top1Router(nn.Module):
+    def __init__(self, config: SwitchMultConvConfig):
+        super().__init__()
+        self.num_experts = config.num_experts
+        self.expert_capacity = config.expert_capacity
+        self.classifier = nn.Linear(
+            config.hidden_size, self.num_experts, bias=config.router_bias
+        )
+        self.jitter_noise = config.router_jitter_noise
+        self.dtype = getattr(torch, config.router_dtype)
+        self.reset_parameters()  # 初始化权重和偏置
+
+    def reset_parameters(self):
+        # 初始化分类器的权重和偏置
+        nn.init.kaiming_uniform_(
+            self.classifier.weight, a=math.sqrt(5)
+        )  # 使用Kaiming初始化方法或其他您选择的方法
+        if self.classifier.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.classifier.weight)
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(self.classifier.bias, -bound, bound)
+        # logger.warning("initalize router weights")
+
+    def _compute_router_probabilities(
+        self, hidden_states: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # float32 is used to ensure stability. See the discussion of "selective precision" in
+        # https://arxiv.org/abs/2101.03961.
+        # We also store the previous dtype to cast back the output to the previous dtype
+        self.input_dtype = hidden_states.dtype
+
+        hidden_states = hidden_states.to(self.dtype)
+
+        if self.training and self.jitter_noise > 0:
+            # Multiply the token inputs by the uniform distribution - adding some noise
+            hidden_states *= torch.empty_like(hidden_states).uniform_(
+                1.0 - self.jitter_noise, 1.0 + self.jitter_noise
+            )
+
+        # Shape: [num_groups, tokens_per_group, num_experts]
+        router_logits = self.classifier(hidden_states)
+
+        # Apply Softmax and cast back to the original `dtype`
+        router_probabilities = nn.functional.softmax(
+            router_logits, dim=-1, dtype=self.dtype
+        ).to(self.input_dtype)
+        return router_probabilities, router_logits
+
+    def forward(self, hidden_states: torch.Tensor) -> Tuple:
+        router_probs, router_logits = self._compute_router_probabilities(hidden_states)
+
+        expert_index = torch.argmax(router_probs, dim=-1)
+        expert_index = torch.nn.functional.one_hot(
+            expert_index, num_classes=self.num_experts
+        )
+
+        # Mask tokens outside expert capacity. Sum over each sequence [batchsize,n_experts]
+        token_priority = torch.cumsum(expert_index, dim=-2)
+
+        # mask if the token routed to to the expert will overflow
+        expert_capacity_mask = token_priority <= self.expert_capacity
+        expert_index = expert_index * expert_capacity_mask
+
+        router_probs = torch.max(router_probs, dim=-1).values.unsqueeze(-1)
+        return expert_index, router_probs, router_logits
+
+
+class SparseMLP(nn.Module):
+    r"""
+    Implementation of the Switch Transformers Sparse MLP module.
+    """
+
+    def __init__(
+        self,
+        config: SwitchMultConvConfig,
+        expert_class: nn.Module = DivDenseActDense,
+    ):
+        super().__init__()
+        # Step 1: Get the correct router according to its class
+        self.router = Top1Router(config)
+
+        # Step 2: Get the experts
+        self.experts = nn.ModuleDict()
+        for idx in range(config.num_experts):
+            self.experts[f"expert_{idx}"] = expert_class(config)
+
+    def forward(self, hidden_states):
+        # Step 1: Get the router_mask from the router as wel as the probabilities
+        router_mask, router_probs, router_logits = self.router(hidden_states)
+        expert_index = torch.argmax(router_mask, dim=-1)
+
+        # The routers introduced might not always map all the tokens, to a router, which means that some hidden states
+        # can be unchanged from one layer to another. That is why the hidden states are cloned before updating only the seleced ones.
+
+        next_states = hidden_states.clone()
+        for idx, expert in enumerate(self.experts.values()):
+            token_indices = router_mask[:, :, idx].bool()
+            next_states[token_indices] = expert(hidden_states[token_indices]).to(
+                next_states.dtype
+            )
+
+        hidden_states = router_probs * next_states
+        return hidden_states, (router_logits, expert_index)
+
+
+class SwitchLayerFF(nn.Module):
+    r"""
+    Switch Transformers Feed Forward layer module. This is a wrapper around the Mixture of Experts module.
+
+    """
+
+    def __init__(self, config: SwitchMultConvConfig, is_sparse=True):
+        super().__init__()
+        self.is_sparse = is_sparse
+        # Check if it is a sparse layer, if not then it is a dense layer
+        if not self.is_sparse:
+            self.mlp = T5DenseActDense(config)
+        else:
+            self.mlp = SparseMLP(config)
+
+        self.layer_norm = nn.LayerNorm(config.d_model)
+        self.dropout = nn.Dropout(config.dropout_rate)
+
+    def forward(self, hidden_states, output_router_logits=False):
+        forwarded_states = self.layer_norm(hidden_states)
+        forwarded_states = self.mlp(forwarded_states)
+
+        if isinstance(forwarded_states, tuple):
+            forwarded_states, router_tuple = forwarded_states
+        else:
+            router_tuple = None
+
+        output = hidden_states + self.dropout(forwarded_states)
+
+        if output_router_logits and router_tuple is not None:
+            output = (output, router_tuple)
+
+        return output
+
+
 class T5Block(nn.Module):
-    def __init__(self, config, has_relative_attention_bias=False):
+    def __init__(self, config: SwitchMultConvConfig, has_relative_attention_bias=False):
         super().__init__()
         self.is_decoder = config.is_decoder
         self.layer = nn.ModuleList()
@@ -407,7 +641,7 @@ class T5Block(nn.Module):
         if self.is_decoder:
             self.layer.append(T5LayerCrossAttention(config))
 
-        self.layer.append(T5LayerFF(config))
+        self.layer.append(SwitchLayerFF(config))
 
     def forward(
         self,
@@ -535,7 +769,7 @@ class T5Block(nn.Module):
 
 
 class T5Stack(T5PreTrainedModel):
-    def __init__(self, config, embed_tokens=None):
+    def __init__(self, config: SwitchMultConvConfig, embed_tokens=None):
         super().__init__(config)
 
         self.embed_tokens = embed_tokens
@@ -862,7 +1096,7 @@ class T5Stack(T5PreTrainedModel):
         )
 
 
-class FLOPForConditionalGeneration(T5PreTrainedModel):
+class SwitchDivMultConvForConditionalGeneration(T5PreTrainedModel):
     _keys_to_ignore_on_load_unexpected = [
         "decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight",
     ]
@@ -872,7 +1106,7 @@ class FLOPForConditionalGeneration(T5PreTrainedModel):
         "lm_head.weight",
     ]
 
-    def __init__(self, config: T5Config):
+    def __init__(self, config: SwitchMultConvConfig):
         super().__init__(config)
         self.model_dim = config.d_model
 
@@ -1207,11 +1441,22 @@ class FLOPForConditionalGeneration(T5PreTrainedModel):
         # 加载配置
         config = kwargs.pop("config", None)
         if config is None:
-            config = T5Config.from_pretrained(pretrained_model_name_or_path)
+            config = SwitchMultConvConfig.from_pretrained(pretrained_model_name_or_path)
+
         # 首先，从预训练模型加载所有权重
         pretrained_weights = T5ForConditionalGeneration.from_pretrained(
             pretrained_model_name_or_path, config=config
         ).state_dict()
+
+        # 提取 FFN 权重
+        ffn_weight_keys = [
+            k for k in pretrained_weights.keys() if "DenseReluDense" in k
+        ]
+
+        # ffn_weights = {k: pretrained_weights[k] for k in ffn_weight_keys}
+        # 删除 FFN 权重以准备加载非FFN权重
+        for k in ffn_weight_keys:
+            del pretrained_weights[k]
 
         # 提取注意力层权重的键
         attention_weight_keys = [
@@ -1219,14 +1464,46 @@ class FLOPForConditionalGeneration(T5PreTrainedModel):
             for k in pretrained_weights.keys()
             if "SelfAttention" in k or "EncDecAttention" in k
         ]
-        # 删除注意力层权重以准备加载其他权重
+        # 删除 注意力层权重 以准备加载其他权重
         for k in attention_weight_keys:
             del pretrained_weights[k]
 
+        # 创建模型的新实例
         model = cls(config)
 
-        # 加载除 注意力层 之外的权重
+        # 加载除 FFN 之外的权重
         model.load_state_dict(pretrained_weights, strict=False)
+
+        # for block_index, block in enumerate(model.encoder.block):
+        #     # 假设原始T5模型中的FFN层权重存储在 ffn_weights 中
+        #     # 获取当前block的FFN权重
+        #     original_ffn_wi = ffn_weights[
+        #         f"encoder.block.{block_index}.layer.1.DenseReluDense.wi.weight"
+        #     ]
+        #     original_ffn_wo = ffn_weights[
+        #         f"encoder.block.{block_index}.layer.1.DenseReluDense.wo.weight"
+        #     ]
+
+        #     # 遍历新模型中的experts，复制权重
+        #     for expert_name, expert in block.layer[1].mlp.experts.items():
+        #         # 复制权重
+        #         expert.wi.weight.data.copy_(original_ffn_wi.data)
+        #         expert.wo.weight.data.copy_(original_ffn_wo.data)
+
+        # for block_index, block in enumerate(model.decoder.block):
+        #     # 获取当前block的FFN权重
+        #     original_ffn_wi = ffn_weights[
+        #         f"decoder.block.{block_index}.layer.2.DenseReluDense.wi.weight"
+        #     ]
+        #     original_ffn_wo = ffn_weights[
+        #         f"decoder.block.{block_index}.layer.2.DenseReluDense.wo.weight"
+        #     ]
+
+        #     # 遍历新模型中的experts，复制权重
+        #     for expert_name, expert in block.layer[2].mlp.experts.items():
+        #         # 复制权重
+        #         expert.wi.weight.data.copy_(original_ffn_wi.data)
+        #         expert.wo.weight.data.copy_(original_ffn_wo.data)
 
         # 可以选择应用自定义的初始化方法，如果需要的话
         # model.apply(model._init_custom_weights)

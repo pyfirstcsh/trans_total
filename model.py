@@ -5,9 +5,16 @@ from model_flop import FLOPForConditionalGeneration
 from model_multConv import MultConvForConditionalGeneration
 from model_sparse import SparseForConditionalGeneration
 from model_switch import SwitchForConditionalGeneration
+from model_switchDiv import SwitchDivForConditionalGeneration
 from model_switch_sparse import SwitchSparseForConditionalGeneration
+from model_switchDiv_sparse import SwitchDivSparseForConditionalGeneration
 from model_sparse_multConv import SparseMultConvForConditionalGeneration
 from model_switch_multConv import SwitchMultConvForConditionalGeneration
+from model_switchDiv_multConv import SwitchDivMultConvForConditionalGeneration
+from model_switch_sparse_multConv import SwitchSparseMultConvForConditionalGeneration
+from model_switchDiv_sparse_multConv import (
+    SwitchDivSparseMultConvForConditionalGeneration,
+)
 from config import (
     MultConvAttnConfig,
     SparseConfig,
@@ -15,6 +22,7 @@ from config import (
     SwitchSparseConfig,
     SparseMultConvConfig,
     SwitchMultConvConfig,
+    SwitchSparseMultConvConfig,
 )
 
 
@@ -40,13 +48,18 @@ def load_model_and_tokenizer(model_args):
 
     # model_name = "base"
     # model_name = "switch"
+    # model_name = "switchDiv"
     # model_name = "sparse"
     # model_name = "flop"
     # model_name = "multConv"
 
     # model_name = "switch_sparse"
+    # model_name = "switchDiv_sparse"
     # model_name = "sparse_multConv"
-    model_name = "switch_multConv"
+    # model_name = "switch_multConv"
+    # model_name = "switchDiv_multConv"
+    # model_name = "switch_sparse_multConv"
+    model_name = "switchDiv_sparse_multConv"
 
     if model_name == "base":
         # 加载模型
@@ -63,6 +76,18 @@ def load_model_and_tokenizer(model_args):
         # 创建自定义配置
         switch_config = SwitchConfig.from_dict(config.to_dict())
         model = SwitchForConditionalGeneration.from_pretrained(
+            pretrained_model_name_or_path=model_args.model_name_or_path,
+            config=switch_config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=model_args.token,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+
+    if model_name == "switchDiv":
+        # 创建自定义配置
+        switch_config = SwitchConfig.from_dict(config.to_dict())
+        model = SwitchDivForConditionalGeneration.from_pretrained(
             pretrained_model_name_or_path=model_args.model_name_or_path,
             config=switch_config,
             cache_dir=model_args.cache_dir,
@@ -117,6 +142,18 @@ def load_model_and_tokenizer(model_args):
             trust_remote_code=model_args.trust_remote_code,
         )
 
+    if model_name == "switchDiv_sparse":
+        # 创建自定义配置
+        switch_sparse_config = SwitchSparseConfig.from_dict(config.to_dict())
+        model = SwitchDivSparseForConditionalGeneration.from_pretrained(
+            pretrained_model_name_or_path=model_args.model_name_or_path,
+            config=switch_sparse_config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=model_args.token,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+
     if model_name == "sparse_multConv":
         # 创建自定义配置
         sparse_multConv_config = SparseMultConvConfig.from_dict(config.to_dict())
@@ -133,6 +170,42 @@ def load_model_and_tokenizer(model_args):
         # 创建自定义配置
         switch_multConv_config = SwitchMultConvConfig.from_dict(config.to_dict())
         model = SwitchMultConvForConditionalGeneration.from_pretrained(
+            pretrained_model_name_or_path=model_args.model_name_or_path,
+            config=switch_multConv_config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=model_args.token,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+
+    if model_name == "switchDiv_multConv":
+        # 创建自定义配置
+        switch_multConv_config = SwitchMultConvConfig.from_dict(config.to_dict())
+        model = SwitchDivMultConvForConditionalGeneration.from_pretrained(
+            pretrained_model_name_or_path=model_args.model_name_or_path,
+            config=switch_multConv_config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=model_args.token,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+
+    if model_name == "switch_sparse_multConv":
+        # 创建自定义配置
+        switch_multConv_config = SwitchSparseMultConvConfig.from_dict(config.to_dict())
+        model = SwitchSparseMultConvForConditionalGeneration.from_pretrained(
+            pretrained_model_name_or_path=model_args.model_name_or_path,
+            config=switch_multConv_config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=model_args.token,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+
+    if model_name == "switchDiv_sparse_multConv":
+        # 创建自定义配置
+        switch_multConv_config = SwitchSparseMultConvConfig.from_dict(config.to_dict())
+        model = SwitchDivSparseMultConvForConditionalGeneration.from_pretrained(
             pretrained_model_name_or_path=model_args.model_name_or_path,
             config=switch_multConv_config,
             cache_dir=model_args.cache_dir,
